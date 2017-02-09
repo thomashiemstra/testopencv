@@ -7,25 +7,25 @@
 #include <fstream>
 #include <list>
 
-
+#define radtodeg 57.29577951
 
 using namespace cv;
 using namespace std;
 int i;
 char imageName[1024];
-const int fps = 5;
+const int fps = 10;
 
 const float calibrationSquareDimension = 0.026f; //meters
-const float arucoSquareDimension = 0.0661f;
+const float arucoSquareDimension = 0.0397f;
 const Size chessboardDimensions = Size(6,9);
 
 void createArucoMarkers(){
     Mat outputMarker;
-    Ptr<aruco::Dictionary> markerDictionary = aruco::getPredefinedDictionary(aruco::DICT_4X4_50);
+    Ptr<aruco::Dictionary> markerDictionary = aruco::getPredefinedDictionary(aruco::DICT_7X7_50);
 
     for(i=0;i<50;i++){
-        aruco::drawMarker(markerDictionary, i, 500, outputMarker,1);
-        sprintf(imageName,"dump/4x4_%d.jpg",i);
+        aruco::drawMarker(markerDictionary, i, 150, outputMarker,1);
+        sprintf(imageName,"dump/7x7_%d.jpg",i);
         printf(imageName); printf("\n");
         imwrite(imageName,outputMarker );
     }
@@ -127,15 +127,52 @@ bool getMatrixFromFile(string name, Mat cameraMatrix, Mat distanceCoefficients){
     return false;
 }
 
+int findIndex(vector<int>& vec, int val){
+    int res;
+    uint16_t length = vec.size();
+    res = find(vec.begin(), vec.end(), val) - vec.begin();
+        if (res >= length){
+            res = -1;
+        }
+    return res;
+}
+
+void findRelativeVectors(int basePos, int Pos, vector<Vec3d>& translationVectors, vector<Vec3d>& rotationVectors, vector<double>& posRes, vector<double>& Rotres ){
+    int i,j;
+    vector<double> R(3);
+    Mat baseRotMatrix = Mat::eye(3,3, CV_64F);
+
+    /* posRes is the vector from the world coordinate system to object 1 expressed in world base vectors*/
+    /* R is the vector from object to base in expressed in the camera frame*/
+    for(i = 0; i < 3; i++)
+        R[i] = translationVectors[Pos][i] -  translationVectors[basePos][i];
+
+    /* R is still expressed with respect to the camera frame, to fix this we must multiply R by the transpose of the rotation matrix between the world and camera frame */
+    Rodrigues(rotationVectors[basePos],baseRotMatrix);
+
+    for(i = 0; i < 3; i++){
+        posRes[i] = 0;
+        for(j = 0; j < 3; j++){
+            posRes[i] += baseRotMatrix.at<double>(j,i)*R[j];
+        }
+    }
+
+    /* since the rotation "vector" are just the 3 euler angles we simply substract (I hope)*/
+    for(i = 0; i < 3; i++)
+        Rotres[i] = rotationVectors[Pos][i] - rotationVectors[basePos][i];
+
+}
+
 int startWebcamMonitoring(const Mat& cameraMatrix, const Mat& distanceCoefficients, float arucoSquareDimension ){
 
     Mat frame;
-
     vector<int> markerIds(2);
     vector<vector<Point2f> > markerCorners, rejectedCandidates;
     aruco::DetectorParameters parameters;
+    vector<Vec3d> rotationVectors, translationVectors;
+    vector<double> relPos1(3), relRot1(3);
 
-    Ptr< aruco::Dictionary> markerDictionary = aruco::getPredefinedDictionary(aruco::DICT_4X4_50);
+    Ptr< aruco::Dictionary> markerDictionary = aruco::getPredefinedDictionary(aruco::DICT_7X7_50);
 
     VideoCapture vid(0);
 
@@ -145,8 +182,6 @@ int startWebcamMonitoring(const Mat& cameraMatrix, const Mat& distanceCoefficien
 
     namedWindow("Webcam",CV_WINDOW_AUTOSIZE);
 
-    vector<Vec3d> rotationVectors, translationVectors;
-
     while(true){
         if(!vid.read(frame))
             break;
@@ -155,16 +190,33 @@ int startWebcamMonitoring(const Mat& cameraMatrix, const Mat& distanceCoefficien
         aruco::estimatePoseSingleMarkers(markerCorners, arucoSquareDimension, cameraMatrix, distanceCoefficients, rotationVectors, translationVectors);
 
         int max = markerIds.size();
-        //cout << "\r" << "markerIds[0]=" << markerIds[0] << "  markerIds[1]=" << markerIds[1] << " markerIds[2]=" << markerIds[2] <<"                   " << flush;
-        if(translationVectors.size() > 1 ){
-            cout << "\r" << "dx=" << translationVectors[0][0] -  translationVectors[1][0] << " dy=" << translationVectors[0][1] -  translationVectors[1][1] << " dz=" << translationVectors[0][2] -  translationVectors[1][2] << "                   " << flush;
+        /* I take marker number 49 to mark my world coordinate system. I need it's index to find the vectors corresponding to it*/
+        int basePos = findIndex(markerIds, 49);
+        /* marker 48 will be used as object 1 which I want to know the position of with respect to the base coordinate system (marker 49)*/
+        int Pos1 = findIndex(markerIds, 48);
+
+        //cout << "\r" << "pos=" << basePos << "markerIds[0]=" << markerIds[0] << "  markerIds[1]=" << markerIds[1] << " markerIds[2]=" << markerIds[2] <<"                   " << flush;
+
+        if(Pos1 != -1 && basePos != -1){
+            findRelativeVectors(basePos, Pos1, translationVectors, rotationVectors, relPos1, relRot1);
+            cout << "\r" << Pos1 << " "<<basePos << " dx=" << 100*relPos1[0] << " dy=" << 100*relPos1[1] << " dz=" << 100*relPos1[2] << "                   " << flush;
         }
 
+
         for(int i = 0; i < max; i++){
-            aruco::drawAxis(frame, cameraMatrix, distanceCoefficients, rotationVectors[i], translationVectors[i], 0.1f);
+            aruco::drawAxis(frame, cameraMatrix, distanceCoefficients, rotationVectors[i], translationVectors[i], 0.08f);
         }
         imshow("Webcam", frame);
-        if(waitKey(1000/fps) == 27){ //wait for 'esc' key press for 30 ms. If 'esc' key is pressed, break loop
+        if(waitKey(1000/fps) == 27){ //wait for 'esc' key press. If 'esc' key is pressed, break loop
+
+            /* baseMatrix is the wrong name but I'm to lazy to change it */
+            Mat baseMatrix = Mat::eye(3,3, CV_64F);
+            Rodrigues(relRot1,baseMatrix);
+            printf("\n%lf %lf %lf", baseMatrix.at<double>(0,0), baseMatrix.at<double>(0,1), baseMatrix.at<double>(0,2));
+            printf("\n%lf %lf %lf", baseMatrix.at<double>(1,0), baseMatrix.at<double>(1,1), baseMatrix.at<double>(1,2));
+            printf("\n%lf %lf %lf", baseMatrix.at<double>(2,0), baseMatrix.at<double>(2,1), baseMatrix.at<double>(2,2));
+            //printf("%lf %lf %lf \n ", rotationVectors[0][0]*radtodeg, rotationVectors[0][1]*radtodeg, rotationVectors[0][2]*radtodeg);
+            //waitKey();
             break;
         }
 
@@ -188,7 +240,7 @@ bool calibrateRoutine(int cameraNumber, Mat cameraMatrix, Mat distanceCoefficien
         return false;
     }
 
-    namedWindow("webcam", CV_WINDOW_AUTOSIZE);
+    namedWindow("Webcam", CV_WINDOW_AUTOSIZE);
 
     while(true){
         if(!vid.read(frame)){
@@ -214,7 +266,7 @@ bool calibrateRoutine(int cameraNumber, Mat cameraMatrix, Mat distanceCoefficien
                     Mat temp;
                     frame.copyTo(temp);
                     savedImages.push_back(temp);
-                   cout << " total = " << savedImages.size() << "\n";
+                   cout << "\r" << " total = " << savedImages.size() << "                   " << flush;
                 }
                 break;
             case 13: //enter key
@@ -238,8 +290,13 @@ bool calibrateRoutine(int cameraNumber, Mat cameraMatrix, Mat distanceCoefficien
 
 int main(){
 
+
     Mat cameraMatrix = Mat::eye(3,3, CV_64F);
     Mat distanceCoefficients = Mat::zeros(5,1, CV_64F);
+
+    //createArucoMarkers();
+    //calibrateRoutine(0, cameraMatrix, distanceCoefficients);
+
     getMatrixFromFile("CameraCalibration", cameraMatrix, distanceCoefficients);
     startWebcamMonitoring(cameraMatrix, distanceCoefficients, arucoSquareDimension);
 
